@@ -11,7 +11,7 @@
        │  1. Get credentials    │                        │
        │───────────────────────>│                        │
        │                        │                        │
-       │  2. Credentials        │                        │
+       │  2. Returns credentials│                        │
        │<───────────────────────│                        │
        │                        │                        │
        │  3. Open WebView       │                        │
@@ -30,6 +30,7 @@
        │<─────────────────────────────────────────────── │
        │                        │                        │
        │  8. Save tokens locally│                        │
+       │   (App storage)        │                        │
        │                        │                        │
        │  9. Get CGM data       │                        │
        │───────────────────────────────────────────────> │
@@ -37,7 +38,11 @@
        │  10. Return CGM data   │                        │
        │<─────────────────────────────────────────────── │
        │                        │                        │
+       │  11. Process & display │                        │
+       │                        │                        │
 ```
+
+**Note:** App only calls Backend for credentials. All other steps (login, token exchange, API calls) are handled directly by the App with Dexcom API.
 
 ## App Flow (iOS/Android)
 
@@ -62,21 +67,21 @@ Backend → Returns: { clientId, redirectUri, loginUrl }
 - Click "Authorize"
 - Redirect with `code` in URL
 
-### 3. Exchange Code for Token
+### 3. Exchange Code for Token (App handles directly)
 ```
-App → POST /api/dexcom/token
-Body: { code: "XXXXX", userId: "user123" }
-Backend → Exchange code → Get tokens → Save to DB
-Backend → Returns: { success: true, access_token, expires_in }
+App → POST /v2/oauth2/token (to Dexcom API)
+Body: { code, client_id, client_secret, grant_type, redirect_uri }
+Dexcom → Returns: { access_token, refresh_token, expires_in }
+App → Save tokens to Local Storage
 ```
 
-### 4. Get CGM Data
+### 4. Get CGM Data (App handles directly)
 ```
-App → GET /api/dexcom/glucose-average?userId=user123&days=7
-Backend → Get access_token from DB (by userId)
-Backend → Auto refresh if expired
-Backend → Call Dexcom API → Calculate stats
-Backend → Returns: { average, min, max, count, unit }
+App → Get access_token from Local Storage
+App → Check expiry → Refresh if needed
+App → GET /v3/users/self/egvs (to Dexcom API)
+Dexcom → Returns: { records: [...] }
+App → Calculate stats → Display to user
 ```
 
 ## Authentication Flow Diagram
@@ -86,13 +91,13 @@ Backend → Returns: { average, min, max, count, unit }
 │                    OAuth 2.0 Flow                            │
 └─────────────────────────────────────────────────────────────┘
 
-Step 1: App requests credentials
+Step 1: App requests credentials (ONLY call to Backend)
    App ──────────> Backend
         GET /api/dexcom/credentials
    App <────────── Backend
         { clientId, redirectUri, loginUrl }
 
-Step 2: User authorization
+Step 2: User authorization (App handles directly)
    App ──────────────────────────────────────> Dexcom
         Open loginUrl in WebView
    User ──────────────────────────────────────> Dexcom
@@ -100,19 +105,14 @@ Step 2: User authorization
    Dexcom ────────────────────────────────────> App
         Redirect: redirectUri?code=XXXXX
 
-Step 3: Exchange code for token
-   App ──────────> Backend
-        POST /api/dexcom/token
-        { code, userId }
-   Backend ──────> Dexcom
+Step 3: Exchange code for token (App handles directly)
+   App ──────────────────────────────────────> Dexcom
         POST /v2/oauth2/token
-        { code, client_id, client_secret }
-   Dexcom ───────> Backend
+        { code, client_id, client_secret, grant_type, redirect_uri }
+   Dexcom ────────────────────────────────────> App
         { access_token, refresh_token, expires_in }
-   Backend ──────> Database
-        Save tokens (linked to userId)
-   Backend ──────> App
-        { success: true, access_token, expires_in }
+   App ──────────────────────────────────────> Local Storage
+        Save tokens locally (for this user)
 ```
 
 ## Data Flow Diagram
@@ -122,33 +122,29 @@ Step 3: Exchange code for token
 │              CGM Data Retrieval Flow                        │
 └─────────────────────────────────────────────────────────────┘
 
-App Request
+App Processing (All handled by App)
    │
-   ├─> GET /api/dexcom/glucose-average?userId=123&days=7
+   ├─> 1. Get access_token from Local Storage
    │
-Backend Processing
-   │
-   ├─> 1. Get userId from request
-   │
-   ├─> 2. Query Database
-   │      └─> Get access_token, refresh_token (by userId)
-   │
-   ├─> 3. Check token expiry
+   ├─> 2. Check token expiry
    │      ├─> If expired ──> Refresh token
    │      │     └─> POST /v2/oauth2/token (refresh_token)
-   │      │     └─> Update DB with new tokens
+   │      │     └─> Update Local Storage with new tokens
    │      └─> If valid ──> Use existing token
    │
-   ├─> 4. Call Dexcom API
+   ├─> 3. Call Dexcom API directly
    │      └─> GET /v3/users/self/egvs
    │          Headers: Authorization: Bearer {access_token}
    │          Params: startDate, endDate
    │
-   ├─> 5. Process Data
+   ├─> 4. Receive CGM Data
+   │      └─> { records: [...] }
+   │
+   ├─> 5. Process Data (App calculates)
    │      └─> Calculate statistics (average, min, max)
    │
-   └─> 6. Return Response
-          └─> { average, min, max, count, unit, ... }
+   └─> 6. Display to User
+          └─> Show charts, stats, etc.
 ```
 
 ## Token Management Flow
@@ -173,10 +169,11 @@ Authorization Code (one-time use)
 
 ## Key Points
 
-- **Backend manages tokens** (store in DB, auto refresh)
-- **App only sends userId**, doesn't need to know tokens
-- **Each user has separate access_token** (stored in DB)
-- **Backend auto-refreshes tokens** when expired
+- **Backend only provides credentials** (clientId, redirectUri, loginUrl)
+- **App handles all OAuth flow** (login, token exchange, API calls)
+- **App stores tokens locally** (Local Storage / Keychain)
+- **App auto-refreshes tokens** when expired
+- **No Backend API needed** for token management or data retrieval
 
 ## Environment Variables
 
